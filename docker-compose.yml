@@ -1,81 +1,168 @@
 version: '3.8'
 
 services:
+  # Banco de dados MySQL
+  mysql:
+    image: mysql:8.0
+    container_name: webbot-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-web_bot_multi_tenant}
+      MYSQL_USER: ${MYSQL_USER:-webbot}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-webbotpassword}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "3306:3306"
+    networks:
+      - webbot-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  # Backend API
   backend:
     build:
       context: .
       dockerfile: Dockerfile.backend
-    container_name: web-bot-backend
+    container_name: webbot-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: ${MYSQL_USER:-webbot}
+      DB_PASSWORD: ${MYSQL_PASSWORD:-webbotpassword}
+      DB_NAME: ${MYSQL_DATABASE:-web_bot_multi_tenant}
+      JWT_SECRET: ${JWT_SECRET:-your_jwt_secret_here}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-your_encryption_key_32_chars_long}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@webbot.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+    volumes:
+      - backend_logs:/app/logs
+      - backend_backups:/app/backups
     ports:
       - "3001:3001"
-    environment:
-      - NODE_ENV=production
-      - PORT=3001
-      - HOST=0.0.0.0
-      - CORS_ORIGIN=http://localhost:5173
-      - WS_CORS_ORIGIN=http://localhost:5173
-      - JWT_SECRET=${JWT_SECRET:-your-super-secret-jwt-key-here}
-      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
-      - ADMIN_USER_ID=${ADMIN_USER_ID:-1}
-    volumes:
-      - ./Grmpay - SEM WEB:/app/data:ro
-      - backend-logs:/app/logs
     networks:
-      - web-bot-network
-    restart: unless-stopped
+      - webbot-network
+    depends_on:
+      mysql:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/api/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
 
+  # Frontend React
   frontend:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-    container_name: web-bot-frontend
-    ports:
-      - "5173:5173"
-    environment:
-      - NODE_ENV=production
-      - VITE_API_URL=http://localhost:3001
-    depends_on:
-      backend:
-        condition: service_healthy
-    networks:
-      - web-bot-network
+    container_name: webbot-frontend
     restart: unless-stopped
+    environment:
+      REACT_APP_API_URL: ${REACT_APP_API_URL:-http://localhost:3001}
+      REACT_APP_WS_URL: ${REACT_APP_WS_URL:-ws://localhost:3001}
+    ports:
+      - "80:80"
+    networks:
+      - webbot-network
+    depends_on:
+      - backend
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5173/"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
 
+  # Nginx Reverse Proxy (opcional)
   nginx:
     image: nginx:alpine
-    container_name: web-bot-nginx
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./ssl:/etc/nginx/ssl:ro
-    depends_on:
-      - backend
-      - frontend
-    networks:
-      - web-bot-network
+    container_name: webbot-nginx
     restart: unless-stopped
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    ports:
+      - "443:443"
+      - "8080:80"
+    networks:
+      - webbot-network
+    depends_on:
+      - frontend
+      - backend
+    profiles:
+      - production
+
+  # Redis para cache (opcional)
+  redis:
+    image: redis:7-alpine
+    container_name: webbot-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redispassword}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - webbot-network
+    profiles:
+      - production
+
+  # Prometheus para monitoramento (opcional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: webbot-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - webbot-network
+    profiles:
+      - monitoring
+
+  # Grafana para dashboards (opcional)
+  grafana:
+    image: grafana/grafana:latest
+    container_name: webbot-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - webbot-network
+    profiles:
+      - monitoring
 
 volumes:
-  backend-logs:
+  mysql_data:
+    driver: local
+  backend_logs:
+    driver: local
+  backend_backups:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
 
 networks:
-  web-bot-network:
+  webbot-network:
     driver: bridge
-
-
-

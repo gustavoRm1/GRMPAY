@@ -1,28 +1,32 @@
-# Backend Node.js
+# Dockerfile para Backend Multi-Tenant
 FROM node:18-alpine
 
-# Configurar UTF-8
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
-ENV NODE_ENV=production
+# Instalar dependências do sistema
+RUN apk add --no-cache \
+    python3 \
+    make \
+    g++ \
+    mysql-client
 
-# Criar usuário não-root
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001
-
-# Definir diretório de trabalho
+# Criar diretório da aplicação
 WORKDIR /app
 
 # Copiar arquivos de dependências
 COPY backend/package*.json ./
-RUN npm ci --only=production && npm cache clean --force
 
-# Copiar código fonte
-COPY backend/src ./src
-COPY backend/config ./config
+# Instalar dependências
+RUN npm ci --only=production
 
-# Criar diretório para logs
-RUN mkdir -p logs && chown -R nodejs:nodejs /app
+# Copiar código da aplicação
+COPY backend/ ./
+
+# Criar usuário não-root
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nodejs -u 1001
+
+# Criar diretórios necessários
+RUN mkdir -p logs backups
+RUN chown -R nodejs:nodejs /app
 
 # Mudar para usuário não-root
 USER nodejs
@@ -32,10 +36,7 @@ EXPOSE 3001
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD node -e "require('http').get('http://localhost:3001/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
+    CMD node -e "require('http').get('http://localhost:3001/api/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
 
 # Comando de inicialização
-CMD ["node", "src/server.js"]
-
-
-
+CMD ["npm", "start"]
